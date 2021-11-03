@@ -1,11 +1,11 @@
 #!/usr/bin/python3
 
 import subprocess
-import pymysql
+import asyncpg
 import socket
 import struct
-import time
 from threading import Thread
+import asyncio
 
 # Running this script as root is dangerous, someone with write access to this file can do bad things!!!
 # This is advised:
@@ -15,10 +15,9 @@ from threading import Thread
 # sudo setcap cap_net_raw,cap_net_admin=eip /usr/sbin/tcpdump
 # sudo ln -s /usr/sbin/tcpdump /usr/bin/tcpdump
 
-def getdata():
+async def getdata():
   #connect to database, remember credentials and hostname and database
-  db = pymysql.connect(host='localhost',user='bla',passwd='bla',db='ntp',autocommit=True)
-  cursor = db.cursor()
+  db = await asyncpg.connect('postgresql://postgres@192.168.86.37/ntp')
   #start the tcpdump process (-n no reverse lookup)
   p = subprocess.Popen(('sudo', 'tcpdump', 'dst', 'port', '123', '-n', '-l'), stdout=subprocess.PIPE)
 
@@ -37,7 +36,7 @@ def getdata():
       #get the values we want
       sourceipsplit = splitted[2].split('.',4)
       sourceip = ".".join(sourceipsplit[0:-1])
-      destinationip =splitted[4][:-1]
+      destinationip = splitted[4][:-1]
       protocolversion = splitted[5][:-1]
 
       #we are only interested in the client traffic
@@ -45,57 +44,15 @@ def getdata():
         ip = sourceip
 
         #parse this into integers for MySQL
-        if 'NTP' not in protocolversion:
-          protocolversion = 0
-        elif protocolversion == 'NTPv1':
-          protocolversion = 1
-        elif protocolversion == 'NTPv2':
-          protocolversion = 2
-        elif protocolversion == 'NTPv3':
-          protocolversion = 3
-        elif protocolversion == 'NTPv4':
-          protocolversion = 4
         #construct SQL and replace (delete if exist and insert new)
-        sql = """REPLACE INTO clients(time,ip,version) VALUES (now(),%s,%s)"""
+        sql = """REPLACE INTO clients(time, ip) VALUES (now(), $1)"""
         sqlip = struct.unpack("!I", socket.inet_aton(ip))[0]
-        try:
-          cursor.execute(sql, (sqlip, protocolversion))
-          #for debug: print(cursor._last_executed)
-        except pymysql.Error as e:
-          print("SQL Error %d: %s" %(e.args[0], e.args[1]))
+        db.execute(sql, sqlip)
 
-def netcat(host, port, content):
-  s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-  s.connect((host,int(port)))
-  s.send(content.encode('utf-8'))
-  s.close()
 
-def exporter():
-  #connect to database, remember credentials and hostname and database
-  db = pymysql.connect(host='localhost',user='bla',passwd='bla',db='ntp',autocommit=True)
-  cursor = db.cursor()
-  while True:
-    #get data from MySQL
-    sql = "SELECT count(*) AS count, version FROM ntp.clients WHERE time > NOW() - INTERVAL 1 MINUTE GROUP BY version"
-    cursor.execute(sql)
-    ntpstats = cursor.fetchall()
-    for row in ntpstats:
-      #define your hostname here, and remember graphite exporter mapping
-      promstring = "ntpserver.<servername>." + "" + str(row[1]) + " " + str(row[0]) + " "+ str(int(time.time()))
-      #send data to graphite exporter on localhost
-      netcat('localhost',9109,promstring)
-
-    #automatically delete records older then 30 minutes
-    delsql="DELETE FROM clients WHERE time < (NOW() - INTERVAL 30 MINUTE)"
-    try:
-      cursor.execute(delsql)
-    except pymysql.Error as e:
-      print("SQL Error %d: %s" %(e.args[0], e.args[1]))
-
-    #sleep for 30 seconds
-    time.sleep(30)
+def run_getdata():
+    asyncio.run(getdata())
 
 #multi-thread these functions
 if __name__ == '__main__':
-  Thread(target = getdata).start()
-  Thread(target = exporter).start()
+  Thread(target = run_getdata).start()
